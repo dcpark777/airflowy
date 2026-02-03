@@ -5,7 +5,6 @@ Should include:
 """
 
 import json
-import time
 import urllib.error
 import urllib.request
 from typing import Optional, Dict, List, Any, Tuple, Callable
@@ -14,12 +13,16 @@ from airflow.models import BaseOperator
 from airflow.utils.context import Context
 from airflow.hooks.base import BaseHook
 
-# Retry behavior: no retry, retry immediately, or retry after backoff (delay in seconds)
-RETRY_BEHAVIOR_NO_RETRY = "no_retry"
-RETRY_BEHAVIOR_IMMEDIATE = "retry_immediate"
-RETRY_BEHAVIOR_BACKOFF = "retry_backoff"
-DEFAULT_RETRY_BACKOFF_SECONDS = 60
-DEFAULT_MAX_TOTAL_RETRIES = 5
+from operators.databricks_retry import (
+    RETRY_BEHAVIOR_BACKOFF,
+    RETRY_BEHAVIOR_IMMEDIATE,
+    RETRY_BEHAVIOR_NO_RETRY,
+    DEFAULT_RETRY_BACKOFF_SECONDS,
+    DEFAULT_MAX_TOTAL_RETRIES,
+    RetryConfig,
+    classify_error as retry_classify_error,
+    run_with_retries as retry_run_with_retries,
+)
 
 
 class SparkDatabricksOperator(BaseOperator):
@@ -56,10 +59,15 @@ class SparkDatabricksOperator(BaseOperator):
         fetch_logs: If True, fetch and log job run output and exceptions to the Airflow
             task log after the run completes. Subclasses must call _log_job_run_output(run_id)
             from execute() for this to take effect. Defaults to True.
-        default_retry_backoff_seconds: Default delay in seconds when retry behavior is
-            RETRY_BEHAVIOR_BACKOFF (e.g. throttling, resource availability). Defaults to 60.
-        max_total_retries: Maximum number of retry attempts across all failures (cap to
-            avoid unbounded loops). Defaults to 5.
+        smart_retry: If True, enable the smart retry layer (classify errors and retry
+            immediately or after backoff). If False, no retries; failure raises once.
+            Defaults to True. Ignored when retry_config is provided.
+        retry_config: Optional RetryConfig to control the retry layer. When None, a
+            config is built from default_retry_backoff_seconds and max_total_retries.
+            Use RetryConfig(enabled=False) to disable retries explicitly.
+        default_retry_backoff_seconds: Default delay (seconds) for backoff retries when
+            retry_config is None. Defaults to 60.
+        max_total_retries: Max retry attempts when retry_config is None. Defaults to 5.
         **kwargs: Additional arguments passed to BaseOperator.
     
     Example:
@@ -108,6 +116,8 @@ class SparkDatabricksOperator(BaseOperator):
         cluster_init_scripts: Optional[List[Dict[str, Any]]] = None,
         service_principal_name: Optional[str] = None,
         fetch_logs: bool = True,
+        smart_retry: bool = True,
+        retry_config: Optional[RetryConfig] = None,
         default_retry_backoff_seconds: int = DEFAULT_RETRY_BACKOFF_SECONDS,
         max_total_retries: int = DEFAULT_MAX_TOTAL_RETRIES,
         *args,
@@ -117,8 +127,15 @@ class SparkDatabricksOperator(BaseOperator):
 
         self.databricks_conn_id = databricks_conn_id
         self.fetch_logs = fetch_logs
-        self.default_retry_backoff_seconds = default_retry_backoff_seconds
-        self.max_total_retries = max_total_retries
+        self.retry_config = (
+            retry_config
+            if retry_config is not None
+            else RetryConfig(
+                enabled=smart_retry,
+                default_retry_backoff_seconds=default_retry_backoff_seconds,
+                max_total_retries=max_total_retries,
+            )
+        )
         self.driver_node_type_id = driver_node_type_id
         self.worker_node_type_id = worker_node_type_id
         self.num_workers = num_workers
@@ -404,257 +421,61 @@ class SparkDatabricksOperator(BaseOperator):
         run_id_for_logs: Optional[int] = None,
     ) -> Any:
         """
-        Run a callable with smart retries based on exception classification.
+        Run a callable with the smart retry layer (when enabled).
 
-        Calls run_fn(context). If it raises, the exception message is passed to
-        _retry_handler to decide: no retry (re-raise), retry immediately, or retry
-        after backoff. Logs and fetches job output when fetch_logs is True and
-        run_id_for_logs is provided (after final failure).
+        When retry_config.enabled is True, delegates to the retry module to classify
+        failures and retry (immediate or backoff). When False, runs run_fn once.
+        Optionally logs job output before re-raising (when fetch_logs and run_id_for_logs).
 
         Args:
             context: Airflow task context.
-            run_fn: Callable that performs the job (submit + wait). Should raise on
-                failure; the exception message is used for retry classification.
+            run_fn: Callable that performs the job (submit + wait); raises on failure.
             run_id_for_logs: If set and fetch_logs is True, _log_job_run_output is
-                called with this run_id when the run fails (before re-raising).
+                called with this run_id before re-raising.
 
         Returns:
             The return value of run_fn(context) on success.
-
-        Raises:
-            The last exception raised by run_fn if all retries are exhausted or
-            the failure is classified as non-retryable.
         """
-        last_exception = None
-        attempt = 0
+        def on_before_raise() -> None:
+            if run_id_for_logs is not None and self.fetch_logs:
+                self._log_job_run_output(run_id_for_logs)
 
-        while True:
-            attempt += 1
-            try:
-                return run_fn(context)
-            except Exception as e:
-                last_exception = e
-                if attempt > self.max_total_retries:
-                    self.log.warning(
-                        "Max total retries (%s) exceeded.", self.max_total_retries
-                    )
-                    if run_id_for_logs is not None and self.fetch_logs:
-                        self._log_job_run_output(run_id_for_logs)
-                    raise
-
-                msg = str(e) or getattr(e, "message", "") or ""
-                behavior, reason, max_retries, retry_delay_seconds = self._retry_handler(
-                    msg
-                )
-
-                if behavior == RETRY_BEHAVIOR_NO_RETRY:
-                    self.log.warning("Failure classified as non-retryable: %s", reason)
-                    if run_id_for_logs is not None and self.fetch_logs:
-                        self._log_job_run_output(run_id_for_logs)
-                    raise
-
-                if max_retries <= 0:
-                    if run_id_for_logs is not None and self.fetch_logs:
-                        self._log_job_run_output(run_id_for_logs)
-                    raise
-
-                self.log.warning(
-                    "Attempt %s failed (%s). Retrying (delay=%ss). Reason: %s",
-                    attempt,
-                    reason,
-                    retry_delay_seconds,
-                    msg[:200] + ("..." if len(msg) > 200 else ""),
-                )
-                if retry_delay_seconds > 0:
-                    self.log.info(
-                        "Sleeping %s seconds before retry (backoff).",
-                        retry_delay_seconds,
-                    )
-                    time.sleep(retry_delay_seconds)
+        return retry_run_with_retries(
+            run_fn,
+            context,
+            self.retry_config,
+            self.log,
+            retryable_patterns=self._get_retryable_error_patterns(),
+            non_retryable_patterns=self._get_non_retryable_error_patterns(),
+            on_before_raise=on_before_raise,
+        )
 
     def _retry_handler(self, spark_error_message: str) -> Tuple[str, str, int, int]:
         """
-        Determine retry behavior based on the Spark/Databricks error message.
+        Classify an error message into retry behavior (delegates to retry module).
 
-        Classifies the failure into one of three behaviors:
-        - **No retry**: Code/config errors (syntax, auth, file not found, etc.). Retry won't help.
-        - **Retry immediately**: Transient API/network issues. A retry may fix right away.
-        - **Retry after backoff**: Throttling or resource availability. Waiting before retry may help.
-
-        Args:
-            spark_error_message: The error message (and optionally logs) from the job.
-
-        Returns:
-            tuple: (retry_behavior, failure_reason, max_retries, retry_delay_seconds)
-            - retry_behavior: One of RETRY_BEHAVIOR_NO_RETRY, RETRY_BEHAVIOR_IMMEDIATE,
-              RETRY_BEHAVIOR_BACKOFF.
-            - failure_reason: Human-readable reason for the classification.
-            - max_retries: Max retries allowed (0 when retry_behavior is NO_RETRY).
-            - retry_delay_seconds: Delay before each retry (0 for IMMEDIATE; used for BACKOFF).
-
-        Note:
-            Subclasses can override _get_retryable_error_patterns() and
-            _get_non_retryable_error_patterns() to customize behavior.
+        Subclasses can override _get_retryable_error_patterns() and
+        _get_non_retryable_error_patterns() to customize; this method uses those.
         """
-        if not spark_error_message:
-            return (
-                RETRY_BEHAVIOR_IMMEDIATE,
-                "Empty error message - allowing retry",
-                3,
-                0,
-            )
-
-        error_lower = spark_error_message.lower()
-
-        # Non-retryable first (code/config/auth/etc.)
-        non_retryable_patterns = self._get_non_retryable_error_patterns()
-        for pattern, reason in sorted(
-            non_retryable_patterns.items(), key=lambda x: len(x[0]), reverse=True
-        ):
-            if pattern.lower() in error_lower:
-                return (
-                    RETRY_BEHAVIOR_NO_RETRY,
-                    f"Non-retryable error: {reason}",
-                    0,
-                    0,
-                )
-
-        # Retryable: immediate (e.g. API/network) vs backoff (e.g. throttling, resources)
-        retryable_patterns = self._get_retryable_error_patterns()
-        backoff = self.default_retry_backoff_seconds
-        for pattern, (reason, max_retries, retry_delay_seconds) in sorted(
-            retryable_patterns.items(), key=lambda x: len(x[0]), reverse=True
-        ):
-            if pattern.lower() in error_lower:
-                delay = retry_delay_seconds if retry_delay_seconds is not None else backoff
-                behavior = (
-                    RETRY_BEHAVIOR_BACKOFF
-                    if delay > 0
-                    else RETRY_BEHAVIOR_IMMEDIATE
-                )
-                return (
-                    behavior,
-                    f"Retryable error: {reason}",
-                    max_retries,
-                    delay,
-                )
-
-        # Unknown: allow retry with backoff (conservative)
-        return (
-            RETRY_BEHAVIOR_BACKOFF,
-            "Unknown error - allowing retry with backoff",
-            2,
-            backoff,
+        return retry_classify_error(
+            spark_error_message,
+            self.retry_config.default_retry_backoff_seconds,
+            retryable_patterns=self._get_retryable_error_patterns(),
+            non_retryable_patterns=self._get_non_retryable_error_patterns(),
         )
 
     def _get_retryable_error_patterns(self) -> Dict[str, Tuple[str, int, Optional[int]]]:
         """
-        Retryable error patterns with (reason, max_retries, retry_delay_seconds).
-
-        retry_delay_seconds: 0 = retry immediately (e.g. API/network). None or >0 = use
-        default_retry_backoff_seconds (e.g. throttling, resource availability).
+        Retryable error patterns. Override in subclasses to customize.
         """
-        backoff = None  # use operator's default_retry_backoff_seconds
-        immediate = 0
+        from operators.databricks_retry import default_retryable_patterns
 
-        return {
-            # Retry immediately: API/network/transient service
-            "connection": ("Connection error - network issue", 3, immediate),
-            "timeout": ("Timeout error - may resolve on retry", 3, immediate),
-            "connection reset": ("Connection reset - transient network issue", 3, immediate),
-            "connection refused": (
-                "Connection refused - service may be temporarily unavailable",
-                3,
-                immediate,
-            ),
-            "network": ("Network error - transient issue", 3, immediate),
-            "service unavailable": ("Service unavailable - transient", 3, immediate),
-            "503": ("Service unavailable (503)", 3, immediate),
-            "502": ("Bad gateway (502) - transient", 3, immediate),
-            "504": ("Gateway timeout (504)", 3, immediate),
-            "read timeout": ("Read timeout - network issue", 3, immediate),
-            "write timeout": ("Write timeout - network issue", 3, immediate),
-            "temporary failure": ("Temporary failure - will retry", 3, immediate),
-            "temporary error": ("Temporary error - will retry", 3, immediate),
-            "retry": ("Error suggests retry", 3, immediate),
-            # Retry after backoff: throttling, resources, cluster
-            "throttl": ("Rate limiting - retry after backoff", 3, backoff),
-            "rate limit": ("Rate limit exceeded - retry after backoff", 3, backoff),
-            "out of memory": ("Out of memory - retry after backoff", 2, backoff),
-            "no space left": ("Disk space issue - retry after backoff", 2, backoff),
-            "resource": ("Resource unavailable - retry after backoff", 3, backoff),
-            "cluster": ("Cluster issue - retry after backoff", 3, backoff),
-            "cluster terminated": ("Cluster terminated unexpectedly", 2, backoff),
-            "spot instance": ("Spot instance interruption", 3, backoff),
-            "instance terminated": ("Instance terminated - transient", 3, backoff),
-            "execution timeout": ("Execution timeout - retry after backoff", 2, backoff),
-            "lock": ("Lock contention - retry after backoff", 2, backoff),
-            "deadlock": ("Deadlock detected - retry after backoff", 2, backoff),
-        }
-    
+        return default_retryable_patterns()
+
     def _get_non_retryable_error_patterns(self) -> Dict[str, str]:
         """
-        Get a dictionary of non-retryable error patterns and their failure reasons.
-        
-        Returns:
-            Dictionary mapping error pattern strings to human-readable failure reasons.
-            Patterns are matched case-insensitively against error messages.
-        
-        Note:
-            Subclasses can override this method to customize non-retryable error patterns.
+        Non-retryable error patterns. Override in subclasses to customize.
         """
-        return {
-            # Syntax and code errors
-            "syntax error": "Syntax error in code",
-            "parse error": "Parse error - code issue",
-            "compilation error": "Compilation error - code issue",
-            "nameerror": "NameError - undefined variable or function",
-            "typeerror": "TypeError - type mismatch",
-            "attributeerror": "AttributeError - missing attribute",
-            "indentationerror": "IndentationError - code formatting issue",
-            
-            # Configuration errors
-            "configuration error": "Configuration error - invalid settings",
-            "invalid configuration": "Invalid configuration",
-            "missing configuration": "Missing required configuration",
-            "config": "Configuration issue",
-            
-            # Authentication and authorization errors
-            "authentication": "Authentication failed - credentials issue",
-            "authorization": "Authorization failed - permission issue",
-            "unauthorized": "Unauthorized access",
-            "forbidden": "Forbidden - access denied",
-            "401": "Unauthorized (401)",
-            "403": "Forbidden (403)",
-            
-            # Data validation errors
-            "data validation": "Data validation failed",
-            "invalid data": "Invalid data format or content",
-            "schema": "Schema mismatch or validation error",
-            "null pointer": "Null pointer exception - data issue",
-            "nullreference": "Null reference - data issue",
-            
-            # File and path errors
-            "file not found": "File not found - path issue",
-            "no such file": "File does not exist",
-            "directory not found": "Directory does not exist",
-            "path not found": "Path does not exist",
-            
-            # Logic errors
-            "assertion": "Assertion failed - logic error",
-            "illegal argument": "Illegal argument - invalid input",
-            "illegal state": "Illegal state - logic error",
-            "index out of bounds": "Index out of bounds - logic error",
-            
-            # Version and compatibility errors
-            "version": "Version mismatch or incompatibility",
-            "incompatible": "Incompatible version or format",
-            "not supported": "Feature not supported",
-            
-            # Client errors (4xx)
-            "400": "Bad request (400) - invalid request",
-            "404": "Not found (404) - resource does not exist",
-            "405": "Method not allowed (405)",
-            "409": "Conflict (409) - resource conflict",
-            "422": "Unprocessable entity (422) - validation error",
-        }
+        from operators.databricks_retry import default_non_retryable_patterns
+
+        return default_non_retryable_patterns()

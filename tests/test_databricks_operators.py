@@ -344,15 +344,16 @@ class TestSparkDatabricksOperator:
         assert operator.fetch_logs is False
 
     def test_default_retry_backoff_and_max_total_retries(self):
-        """Test default and custom retry backoff / max total retries."""
+        """Test default and custom retry backoff / max total retries via retry_config."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        assert operator.default_retry_backoff_seconds == 60
-        assert operator.max_total_retries == 5
+        assert operator.retry_config.enabled is True
+        assert operator.retry_config.default_retry_backoff_seconds == 60
+        assert operator.retry_config.max_total_retries == 5
 
         operator2 = SparkDatabricksOperator(
             task_id='test_spark_job2',
@@ -362,8 +363,36 @@ class TestSparkDatabricksOperator:
             default_retry_backoff_seconds=120,
             max_total_retries=3,
         )
-        assert operator2.default_retry_backoff_seconds == 120
-        assert operator2.max_total_retries == 3
+        assert operator2.retry_config.default_retry_backoff_seconds == 120
+        assert operator2.retry_config.max_total_retries == 3
+
+    def test_smart_retry_disabled(self):
+        """When smart_retry=False, retry_config.enabled is False."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            smart_retry=False,
+        )
+        assert operator.retry_config.enabled is False
+
+    def test_retry_config_explicit(self):
+        """When retry_config is provided, it is used and smart_retry is ignored."""
+        from operators.databricks_retry import RetryConfig
+
+        config = RetryConfig(enabled=False, max_total_retries=10)
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            smart_retry=True,
+            retry_config=config,
+        )
+        assert operator.retry_config is config
+        assert operator.retry_config.enabled is False
+        assert operator.retry_config.max_total_retries == 10
 
 
 class TestRunWithRetries:
@@ -400,6 +429,28 @@ class TestRunWithRetries:
                 context={'ti': MagicMock()},
                 run_fn=fail_syntax,
             )
+
+    def test_run_with_retries_disabled_runs_once(self):
+        """When smart_retry is False, _run_with_retries runs run_fn once and raises (no retry loop)."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            smart_retry=False,
+        )
+        calls = []
+
+        def fail_connection(_):
+            calls.append(1)
+            raise RuntimeError("Connection error occurred")
+
+        with pytest.raises(RuntimeError, match="Connection error"):
+            operator._run_with_retries(
+                context={'ti': MagicMock()},
+                run_fn=fail_connection,
+            )
+        assert len(calls) == 1
 
     def test_run_with_retries_retry_then_success(self):
         """_run_with_retries retries on retryable error and returns when run_fn succeeds."""
@@ -465,7 +516,7 @@ class TestRunWithRetries:
                 raise RuntimeError("Rate limit exceeded")
             return "ok"
 
-        with patch('operators.databricks_operators.time.sleep') as mock_sleep:
+        with patch('operators.databricks_retry.time.sleep') as mock_sleep:
             result = operator._run_with_retries(
                 context={'ti': MagicMock()},
                 run_fn=fail_once_then_succeed,
