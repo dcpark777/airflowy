@@ -1,9 +1,11 @@
 """Tests for Databricks operators plugin."""
 
+import json
 import os
-import pytest
-from unittest.mock import Mock, patch, MagicMock
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch, PropertyMock
+
+import pytest
 
 # Set Airflow environment before importing
 os.environ.setdefault('AIRFLOW_HOME', str(Path(__file__).parent.parent))
@@ -310,9 +312,244 @@ class TestSparkDatabricksOperator:
             worker_node_type_id='i3.xlarge',
         )
         context = {'ti': MagicMock()}
-        
+
         with pytest.raises(NotImplementedError):
             operator.execute(context)
+
+    def test_fetch_logs_default_true(self):
+        """Test that fetch_logs defaults to True."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        assert operator.fetch_logs is True
+
+    def test_fetch_logs_explicit_false(self):
+        """Test that fetch_logs can be set to False."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            num_workers=2,
+            fetch_logs=False,
+        )
+        assert operator.fetch_logs is False
+
+
+class TestJobRunOutputLogging:
+    """Tests for _get_run_output and _log_job_run_output (job logs in Airflow task log)."""
+
+    @patch('operators.databricks_operators.BaseHook.get_connection')
+    def test_get_run_output_returns_none_when_no_host(self, mock_get_connection):
+        """_get_run_output returns None when connection has no host."""
+        conn = MagicMock()
+        conn.host = None
+        conn.password = 'token'
+        conn.extra = None
+        conn.extra_dejson = {}
+        mock_get_connection.return_value = conn
+
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        result = operator._get_run_output(12345)
+        assert result is None
+
+    @patch('operators.databricks_operators.BaseHook.get_connection')
+    def test_get_run_output_returns_none_when_no_token(self, mock_get_connection):
+        """_get_run_output returns None when connection has no token."""
+        conn = MagicMock()
+        conn.host = 'https://myworkspace.cloud.databricks.com'
+        conn.password = None
+        conn.extra = None
+        conn.extra_dejson = {}
+        mock_get_connection.return_value = conn
+
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        result = operator._get_run_output(12345)
+        assert result is None
+
+    @patch('operators.databricks_operators.urllib.request.urlopen')
+    @patch('operators.databricks_operators.BaseHook.get_connection')
+    def test_get_run_output_returns_output_when_api_succeeds(
+        self, mock_get_connection, mock_urlopen
+    ):
+        """_get_run_output returns dict with metadata and output when API succeeds."""
+        conn = MagicMock()
+        conn.host = 'https://myworkspace.cloud.databricks.com'
+        conn.password = 'secret-token'
+        conn.extra = None
+        conn.extra_dejson = {}
+        mock_get_connection.return_value = conn
+
+        run_get_resp = MagicMock()
+        run_get_resp.read.return_value = json.dumps({
+            'run_id': 12345,
+            'state': {'life_cycle_state': 'TERMINATED', 'result_state': 'SUCCESS'},
+            'run_page_url': 'https://myworkspace.cloud.databricks.com/#job/1/run/12345',
+        }).encode()
+        run_get_resp.__enter__ = lambda self: self
+        run_get_resp.__exit__ = lambda self, *a: None
+
+        get_output_resp = MagicMock()
+        get_output_resp.read.return_value = json.dumps({
+            'notebook_output': {'result': 'ok'},
+            'run_page_url': 'https://myworkspace.cloud.databricks.com/#job/1/run/12345',
+        }).encode()
+        get_output_resp.__enter__ = lambda self: self
+        get_output_resp.__exit__ = lambda self, *a: None
+
+        mock_urlopen.side_effect = [run_get_resp, get_output_resp]
+
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        result = operator._get_run_output(12345)
+
+        assert result is not None
+        assert result.get('metadata', {}).get('run_id') == 12345
+        assert result.get('notebook_output') == {'result': 'ok'}
+        assert 'run_page_url' in result
+
+    @patch('operators.databricks_operators.urllib.request.urlopen')
+    @patch('operators.databricks_operators.BaseHook.get_connection')
+    def test_get_run_output_includes_error_when_run_failed(
+        self, mock_get_connection, mock_urlopen
+    ):
+        """_get_run_output includes error message and stack_trace when run failed."""
+        conn = MagicMock()
+        conn.host = 'https://myworkspace.cloud.databricks.com'
+        conn.password = 'secret-token'
+        conn.extra = None
+        conn.extra_dejson = {}
+        mock_get_connection.return_value = conn
+
+        run_get_resp = MagicMock()
+        run_get_resp.read.return_value = json.dumps({
+            'run_id': 12345,
+            'state': {'life_cycle_state': 'TERMINATED', 'result_state': 'FAILED'},
+        }).encode()
+        run_get_resp.__enter__ = lambda self: self
+        run_get_resp.__exit__ = lambda self, *a: None
+
+        get_output_resp = MagicMock()
+        get_output_resp.read.return_value = json.dumps({
+            'error': {
+                'message': 'AnalysisException: table or view not found',
+                'stack_trace': '  at line 42 ...',
+            },
+        }).encode()
+        get_output_resp.__enter__ = lambda self: self
+        get_output_resp.__exit__ = lambda self, *a: None
+
+        mock_urlopen.side_effect = [run_get_resp, get_output_resp]
+
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        result = operator._get_run_output(12345)
+
+        assert result is not None
+        assert result.get('error', {}).get('message') == 'AnalysisException: table or view not found'
+        assert 'stack_trace' in result.get('error', {})
+
+    def test_log_job_run_output_no_op_when_fetch_logs_false(self):
+        """_log_job_run_output does not call _get_run_output when fetch_logs is False."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            fetch_logs=False,
+        )
+        with patch.object(operator, '_get_run_output') as mock_get:
+            operator._log_job_run_output(999)
+        mock_get.assert_not_called()
+
+    @patch('operators.databricks_operators.urllib.request.urlopen')
+    @patch('operators.databricks_operators.BaseHook.get_connection')
+    def test_log_job_run_output_logs_to_airflow(
+        self, mock_get_connection, mock_urlopen
+    ):
+        """_log_job_run_output logs metadata and notebook output to Airflow log."""
+        conn = MagicMock()
+        conn.host = 'https://myworkspace.cloud.databricks.com'
+        conn.password = 'secret-token'
+        conn.extra = None
+        conn.extra_dejson = {}
+        mock_get_connection.return_value = conn
+
+        run_get_resp = MagicMock()
+        run_get_resp.read.return_value = json.dumps({
+            'run_id': 12345,
+            'state': {'life_cycle_state': 'TERMINATED', 'result_state': 'SUCCESS'},
+            'run_page_url': 'https://example.com/run/12345',
+        }).encode()
+        run_get_resp.__enter__ = lambda self: self
+        run_get_resp.__exit__ = lambda self, *a: None
+
+        get_output_resp = MagicMock()
+        get_output_resp.read.return_value = json.dumps({
+            'notebook_output': {'result': 'done'},
+            'run_page_url': 'https://example.com/run/12345',
+        }).encode()
+        get_output_resp.__enter__ = lambda self: self
+        get_output_resp.__exit__ = lambda self, *a: None
+
+        mock_urlopen.side_effect = [run_get_resp, get_output_resp]
+
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            fetch_logs=True,
+        )
+        operator._log_job_run_output(12345)
+        # Verify both API calls were made (runs/get and runs/get-output)
+        assert mock_urlopen.call_count == 2
+
+    def test_log_job_run_output_logs_exception_when_present(self):
+        """_log_job_run_output logs error and stack_trace via log.error when output has error."""
+        output = {
+            'metadata': {'run_id': 99},
+            'error': {
+                'message': 'AnalysisException: table not found',
+                'stack_trace': '  at org.apache.spark...',
+            },
+        }
+        mock_log = MagicMock()
+        with patch('airflow.models.baseoperator.BaseOperator.log', new_callable=PropertyMock) as mock_log_prop:
+            mock_log_prop.return_value = mock_log
+            operator = SparkDatabricksOperator(
+                task_id='test_spark_job',
+                databricks_conn_id='databricks_default',
+                driver_node_type_id='i3.xlarge',
+                worker_node_type_id='i3.xlarge',
+                fetch_logs=True,
+            )
+            with patch.object(operator, '_get_run_output', return_value=output):
+                operator._log_job_run_output(99)
+        mock_log.error.assert_any_call("--- Databricks run error ---")
+        mock_log.error.assert_any_call("Message: %s", "AnalysisException: table not found")
+        mock_log.error.assert_any_call("Stack trace:\n%s", "  at org.apache.spark...")
 
 
 class TestRetryHandler:

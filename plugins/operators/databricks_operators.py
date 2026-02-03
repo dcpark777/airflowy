@@ -4,6 +4,9 @@ Should include:
 - SparkDatabricksOperator: Base operator for running Spark jobs on Databricks
 """
 
+import json
+import urllib.error
+import urllib.request
 from typing import Optional, Dict, List, Any, Tuple
 
 from airflow.models import BaseOperator
@@ -42,6 +45,9 @@ class SparkDatabricksOperator(BaseOperator):
         spot_bid_price_percent: Spot bid price as percentage of on-demand price. Defaults to 100.
         cluster_init_scripts: List of cluster initialization scripts.
         service_principal_name: Service principal name for authentication. Defaults to None.
+        fetch_logs: If True, fetch and log job run output and exceptions to the Airflow
+            task log after the run completes. Subclasses must call _log_job_run_output(run_id)
+            from execute() for this to take effect. Defaults to True.
         **kwargs: Additional arguments passed to BaseOperator.
     
     Example:
@@ -89,12 +95,14 @@ class SparkDatabricksOperator(BaseOperator):
         spot_bid_price_percent: int = 100,
         cluster_init_scripts: Optional[List[Dict[str, Any]]] = None,
         service_principal_name: Optional[str] = None,
+        fetch_logs: bool = True,
         *args,
         **kwargs
     ):
         super().__init__(*args, **kwargs)
-        
+
         self.databricks_conn_id = databricks_conn_id
+        self.fetch_logs = fetch_logs
         self.driver_node_type_id = driver_node_type_id
         self.worker_node_type_id = worker_node_type_id
         self.num_workers = num_workers
@@ -136,12 +144,157 @@ class SparkDatabricksOperator(BaseOperator):
     def get_hook(self):
         """
         Get the Databricks hook for this connection.
-        
+
         Returns:
             The Databricks hook instance.
         """
         return BaseHook.get_hook(conn_id=self.databricks_conn_id)
-    
+
+    def _get_run_output(self, run_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Fetch run output and metadata from the Databricks Jobs API (get-output and run details).
+
+        Uses the Airflow Databricks connection (host + token) to call the Databricks REST API.
+        Compatible with any Databricks connection; does not require a specific provider hook.
+
+        Args:
+            run_id: The Databricks job run ID.
+
+        Returns:
+            A dict with keys such as metadata, notebook_output, sql_output, error (message,
+            stack_trace), run_page_url, or None if the API call fails (e.g. connection not
+            configured or endpoint unavailable).
+        """
+        try:
+            conn = BaseHook.get_connection(self.databricks_conn_id)
+            host = (conn.host or "").rstrip("/")
+            if not host:
+                self.log.warning("Databricks connection %s has no host; cannot fetch run output.", self.databricks_conn_id)
+                return None
+            if not host.startswith("http"):
+                host = "https://" + host
+            extra = getattr(conn, "extra_dejson", None) or {}
+            token = conn.password or (extra.get("token") if isinstance(extra, dict) else None)
+            if not token:
+                self.log.warning("Databricks connection %s has no token; cannot fetch run output.", self.databricks_conn_id)
+                return None
+        except Exception as e:  # noqa: BLE001
+            self.log.warning("Could not get Databricks connection for run output: %s", e)
+            return None
+
+        result: Dict[str, Any] = {}
+
+        # Get run details (state, run_page_url, etc.)
+        try:
+            url = f"{host}/api/2.1/jobs/runs/get?run_id={run_id}"
+            req = urllib.request.Request(url, method="GET")
+            req.add_header("Authorization", "Bearer " + token)
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            result["metadata"] = data
+            result["run_page_url"] = data.get("run_page_url")
+        except urllib.error.HTTPError as e:
+            result["metadata"] = {"run_id": run_id, "http_error": str(e.code), "reason": e.reason}
+            if e.code == 404:
+                self.log.warning("Run %s not found (404). It may have been deleted.", run_id)
+            else:
+                self.log.warning("Failed to get run details for %s: %s %s", run_id, e.code, e.reason)
+        except Exception as e:  # noqa: BLE001
+            self.log.warning("Error fetching run details for %s: %s", run_id, e)
+            result["metadata"] = {"run_id": run_id, "error": str(e)}
+
+        # Get run output (notebook_output, sql_output, error message/stack_trace)
+        try:
+            url = f"{host}/api/2.1/jobs/runs/get-output?run_id={run_id}"
+            req = urllib.request.Request(url, method="GET")
+            req.add_header("Authorization", "Bearer " + token)
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+            result["notebook_output"] = data.get("notebook_output")
+            result["sql_output"] = data.get("sql_output")
+            if data.get("error"):
+                result["error"] = data["error"]
+            if data.get("run_page_url"):
+                result["run_page_url"] = data["run_page_url"]
+        except urllib.error.HTTPError as e:
+            result["output_error"] = {"code": e.code, "reason": e.reason}
+            if e.code == 400:
+                try:
+                    body = e.read().decode() if e.fp else ""
+                    if "multiple tasks" in body.lower():
+                        result["error"] = {"message": "Run has multiple tasks; output must be fetched per task run."}
+                except Exception:  # noqa: S110
+                    pass
+        except Exception as e:  # noqa: BLE001
+            result["output_error"] = {"message": str(e)}
+
+        return result
+
+    def _log_job_run_output(self, run_id: int) -> None:
+        """
+        Fetch the job run output from Databricks and write it to the Airflow task log.
+
+        Logs run metadata (e.g. state, run_page_url), any notebook/sql output, and any
+        error message or stack trace. Call this from execute() after the run completes
+        (success or failure) when fetch_logs is True.
+
+        Args:
+            run_id: The Databricks job run ID.
+        """
+        if not self.fetch_logs:
+            return
+        output = self._get_run_output(run_id)
+        if not output:
+            return
+
+        self.log.info("=== Databricks run_id: %s ===", run_id)
+
+        metadata = output.get("metadata") or {}
+        if isinstance(metadata, dict):
+            state = metadata.get("state", {}).get("life_cycle_state") or metadata.get("state")
+            result_state = metadata.get("state", {}).get("result_state") if isinstance(metadata.get("state"), dict) else None
+            run_page_url = output.get("run_page_url") or metadata.get("run_page_url")
+            if state:
+                self.log.info("Run state: %s%s", state, f" (result: {result_state})" if result_state else "")
+            if run_page_url:
+                self.log.info("Run URL: %s", run_page_url)
+
+        notebook_output = output.get("notebook_output")
+        if notebook_output:
+            self.log.info("--- Notebook output ---")
+            if isinstance(notebook_output, dict):
+                for k, v in notebook_output.items():
+                    self.log.info("%s: %s", k, v)
+            else:
+                self.log.info("%s", notebook_output)
+
+        sql_output = output.get("sql_output")
+        if sql_output:
+            self.log.info("--- SQL output ---")
+            if isinstance(sql_output, dict):
+                for k, v in sql_output.items():
+                    self.log.info("%s: %s", k, v)
+            else:
+                self.log.info("%s", sql_output)
+
+        error = output.get("error")
+        if error:
+            self.log.error("--- Databricks run error ---")
+            if isinstance(error, dict):
+                msg = error.get("message") or error.get("summary") or str(error)
+                self.log.error("Message: %s", msg)
+                stack = error.get("stack_trace")
+                if stack:
+                    self.log.error("Stack trace:\n%s", stack)
+            else:
+                self.log.error("%s", error)
+
+        output_err = output.get("output_error")
+        if output_err:
+            self.log.warning("Could not retrieve full run output: %s", output_err)
+
     def build_cluster_config(self) -> Dict[str, Any]:
         """
         Build the cluster configuration dictionary.
@@ -206,16 +359,20 @@ class SparkDatabricksOperator(BaseOperator):
     def execute(self, context: Context) -> Any:
         """
         Execute the Databricks Spark job.
-        
+
         This is a base implementation that should be overridden by subclasses
         to implement specific job submission logic (e.g., submit_run, run_now, etc.).
-        
+
+        Subclasses should call :meth:`_log_job_run_output` with the run_id after the
+        run completes (success or failure) when :attr:`fetch_logs` is True, so that
+        job logs and exceptions appear in the Airflow task log.
+
         Args:
             context: The task execution context.
-        
+
         Returns:
             The result of the job execution (typically a run_id or job result).
-        
+
         Raises:
             NotImplementedError: If this base method is called directly.
         """
