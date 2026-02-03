@@ -1,0 +1,51 @@
+# Dockerfile for running tests
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first (for better caching)
+COPY requirements-test.txt /app/
+RUN pip install --no-cache-dir -r requirements-test.txt
+
+# Install Airflow (for DAG testing) - minimal install with compatible dependencies
+# Pin pendulum to version compatible with Airflow 2.5.3
+RUN pip install --no-cache-dir \
+    "pendulum<3.0.0" \
+    apache-airflow==2.5.3 \
+    croniter
+
+# Copy project structure (plugins need to be available)
+# Copy in order that allows proper module resolution
+COPY plugins/ /app/plugins/
+COPY dags/ /app/dags/
+COPY tests/ /app/tests/
+COPY pytest.ini /app/pytest.ini
+
+# Set Python path to include project root and plugins
+ENV PYTHONPATH=/app:/app/plugins
+
+# Create test results directory
+RUN mkdir -p /app/test-results
+
+# Create entrypoint script in /usr/local/bin (won't be overwritten by volume mounts)
+RUN echo '#!/bin/bash\n\
+set -e\n\
+export AIRFLOW_HOME=/app\n\
+export AIRFLOW__CORE__EXECUTOR=SequentialExecutor\n\
+export AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////tmp/test_airflow.db\n\
+export AIRFLOW__CORE__LOAD_EXAMPLES=false\n\
+# Initialize Airflow database (silent mode)\n\
+airflow db init > /dev/null 2>&1 || true\n\
+# Run pytest with all arguments\n\
+exec pytest "$@"\n\
+' > /usr/local/bin/test-entrypoint.sh && chmod +x /usr/local/bin/test-entrypoint.sh
+
+# Default command runs tests via entrypoint
+ENTRYPOINT ["/usr/local/bin/test-entrypoint.sh"]
+CMD ["tests/", "-v", "--junitxml=/app/test-results/junit.xml"]
+

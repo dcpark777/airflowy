@@ -1,0 +1,83 @@
+# Pre-commit hooks for Airflowy
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(logs/|test-results/)
+      - id: end-of-file-fixer
+        exclude: ^(logs/|test-results/)
+      - id: check-yaml
+        args: [--unsafe]  # Allow custom YAML tags
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+      - id: detect-private-key
+
+  # Python code formatting
+  - repo: https://github.com/psf/black
+    rev: 23.12.1
+    hooks:
+      - id: black
+        language_version: python3
+        exclude: ^(logs/|test-results/|__pycache__/)
+
+  # Python linting
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.0.0
+    hooks:
+      - id: flake8
+        additional_dependencies: [flake8-docstrings]
+        args: [
+          --max-line-length=100,
+          --extend-ignore=E203,  # Black conflict
+          --exclude=logs,test-results,__pycache__,
+        ]
+        exclude: ^(logs/|test-results/|__pycache__/)
+
+  # Python import sorting
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: [--profile=black, --line-length=100]
+        exclude: ^(logs/|test-results/|__pycache__/)
+
+  # DAG validation (custom hook)
+  - repo: local
+    hooks:
+      - id: validate-dags
+        name: Validate DAGs
+        entry: python scripts/validate_dags.py
+        language: system
+        types: [python]
+        files: ^dags/.*\.py$
+        pass_filenames: true
+        always_run: false
+
+      - id: check-dag-naming
+        name: Check DAG naming conventions
+        entry: python scripts/check_dag_naming.py
+        language: system
+        types: [python]
+        files: ^dags/.*\.py$
+        pass_filenames: true
+        always_run: false
+
+      - id: check-dag-resources
+        name: Check DAG resource limits
+        entry: python scripts/check_dag_resources.py
+        language: system
+        types: [python]
+        files: ^dags/.*\.py$
+        pass_filenames: true
+        always_run: false
+

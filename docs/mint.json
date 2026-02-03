@@ -1,0 +1,517 @@
+{
+    "name": "Mage",
+    "logo": {
+      "light": "logo.png",
+      "dark": "logo.png"
+    },
+    "favicon": "/airflow-logo.png",
+    "colors": {
+      "primary": "#7E53F8",
+      "light": "#BFA8FF",
+      "dark": "#4C22C0",
+      "ultraLight": "#E4DAFF",
+      "ultraDark": "#270A7A",
+      "background": {
+        "dark": "#121212"
+      }
+    },
+    "feedback": {
+      "suggestEdit": true,
+      "raiseIssue": true
+    },
+    "metadata": {
+      "og:image": "https://media.graphassets.com/j4XVqcsxTG2x50kBJryE",
+      "twitter:site": "@mage_ai"
+    },
+    "topbarCtaButton": {
+      "type": "github",
+      "url": "https://github.com/mage-ai/mage-ai"
+    },
+    "anchors": [
+      {
+        "name": "Watch 2 min demo",
+        "icon": "circle-play",
+        "url": "https://www.youtube.com/watch?v=hrsErfPDits"
+      },
+      {
+        "name": "Play with live tool",
+        "icon": "bullseye-pointer",
+        "url": "https://demo.mage.ai"
+      },
+      {
+        "name": "Get instant help",
+        "icon": "slack",
+        "url": "https://www.mage.ai/chat"
+      }
+    ],
+    "navigation": [
+      {
+        "group": "Introduction",
+        "pages": [
+          "introduction/overview",
+          "getting-started/setup",
+          "community/contributing"
+        ]
+      },
+      {
+        "group": "Tutorials",
+        "pages": [
+          {
+            "group": "ETL",
+            "pages": [
+              "tutorials/load-api-data",
+              "tutorials/etl/complete-project"
+            ]
+          },
+          "tutorials/setup-dbt",
+          {
+            "group": "ML",
+            "pages": [
+              "tutorials/train-model",
+              "tutorials/train/complete-project"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Design",
+        "pages": [
+          "design/core-design-principles",
+          "design/core-abstractions",
+          "design/data-pipeline-management",
+          {
+            "group": "Blocks",
+            "pages": [
+              "design/blocks",
+              "design/blocks/data-loader",
+              "design/blocks/transformer",
+              "design/blocks/data-exporter",
+              "design/blocks/scratchpad",
+              "design/blocks/sensor",
+              "design/blocks/dynamic-blocks",
+              "design/blocks/extension"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Data integrations",
+        "pages": [
+          "data-integrations/overview",
+          {
+            "group": "Sources",
+            "pages": [
+              "data-integrations/sources/overview",
+              "data-integrations/sources/add-new-source",
+              "data-integrations/sources/adapt-existing-source",
+              "data-integrations/sources/postgresql"
+            ]
+          },
+          {
+            "group": "Destinations",
+            "pages": [
+              "data-integrations/destinations/overview",
+              "data-integrations/destinations/add-new-destination",
+              "data-integrations/destinations/adapt-existing-destination"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "DBT",
+        "pages": [
+          "dbt/overview",
+          "dbt/add-existing-dbt",
+          "dbt/run-single-model",
+          "dbt/run-selected-model",
+          "dbt/running-dbt-tests",
+          "dbt/sources",
+          "dbt/connection-profiles",
+          "dbt/docs"
+        ]
+      },
+      {
+        "group": "Development",
+        "pages": [
+          "development/project/setup",
+          {
+            "group": "Pipelines",
+            "pages": [
+              "guides/batch-pipeline",
+              "guides/data-integration-pipeline",
+              "guides/streaming-pipeline"
+            ]
+          },
+          {
+            "group": "Blocks",
+            "pages": [
+              {
+                "group": "Data loader",
+                "pages": [
+                  "design/data-loading",
+                  "guides/load-data-s3",
+                  "guides/io_config",
+                  "development/blocks/data_loaders/templates"
+                ]
+              },
+              {
+                "group": "Transformer",
+                "pages": [
+                  "guides/transformer-blocks",
+                  "development/blocks/transformers/templates"
+                ]
+              },
+              {
+                "group": "Data exporter",
+                "pages": [
+                  "guides/export-data-s3",
+                  "development/blocks/data_exporters/templates"
+                ]
+              },
+              {
+                "group": "Sensors",
+                "pages": [
+                  "guides/sensors",
+                  "development/blocks/sensors/templates"
+                ]
+              },
+              "guides/blocks/callbacks",
+              {
+                "group": "SQL",
+                "pages": [
+                  "guides/sql-blocks",
+                  "development/blocks/sql/trino"
+                ]
+              },
+              "guides/r-blocks",
+              "guides/blocks/dynamic-blocks",
+              "guides/blocks/custom-blocks"
+            ]
+          },
+          {
+            "group": "Dependencies",
+            "pages": [
+              "development/dependencies/requirements",
+              "development/dependencies/custom-files"
+            ]
+          },
+          {
+            "group": "Streaming pipelines",
+            "pages": [
+              "guides/streaming/overview",
+              "guides/streaming/streaming-pipeline-rabbitmq",
+              {
+                "group": "Sources",
+                "pages": [
+                  "guides/streaming/sources/amazon-sqs",
+                  "guides/streaming/sources/azure-event-hub",
+                  "guides/streaming/sources/kafka",
+                  "guides/streaming/sources/kinesis"
+                ]
+              },
+              {
+                "group": "Destinations",
+                "pages": [
+                  "guides/streaming/destinations/amazon-s3",
+                  "guides/streaming/destinations/dummy",
+                  "guides/streaming/destinations/kafka",
+                  "guides/streaming/destinations/kinesis",
+                  "guides/streaming/destinations/opensearch",
+                  "guides/streaming/destinations/redshift"
+                ]
+              },
+              "guides/streaming/contributing"
+            ]
+          },
+          "production/configuring-production-settings/runtime-variable",
+          {
+            "group": "Testing",
+            "pages": [
+              "guides/data-validation",
+              "development/testing/great-expectations",
+              "development/testing/unit-tests"
+            ]
+          },
+          {
+            "group": "Secrets",
+            "pages": [
+              "development/secrets/secrets",
+              "development/secrets/GCP"
+            ]
+          },
+          {
+            "group": "Versioning",
+            "pages": [
+              "developing-in-the-cloud/setting-up-git",
+              "development/versioning/file-versions"
+            ]
+          },
+          "development/environment-variables",
+          {
+            "group": "Team management",
+            "pages": [
+              "developing-in-the-cloud/cloud-dev-environments/overview",
+              "developing-in-the-cloud/cloud-dev-environments/aws-ecs",
+              "developing-in-the-cloud/cloud-dev-environments/cloud-run",
+              "developing-in-the-cloud/cloud-dev-environments/kubernetes"
+            ]
+          },
+          "development/text-editor",
+          "development/troubleshooting"
+        ]
+      },
+      {
+        "group": "Orchestration",
+        "pages": [
+          {
+            "group": "Schedules and triggers",
+            "pages": [
+              "guides/triggering-pipelines",
+              "guides/schedule-pipelines",
+              {
+                "group": "Event triggers",
+                "pages": [
+                  "guides/triggers/events/overview",
+                  "guides/triggers/events/aws"
+                ]
+              },
+              "guides/trigger-pipeline-api",
+              "guides/triggers/configure-triggers-in-code"
+            ]
+          },
+          {
+            "group": "Backfills",
+            "pages": [
+              "orchestration/backfills/overview",
+              "orchestration/backfills/guides"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Production",
+        "pages": [
+          {
+            "group": "Authentication",
+            "pages": [
+              "production/authentication/overview"
+            ]
+          },
+          {
+            "group": "CI/CD",
+            "pages": [
+              "production/ci-cd/overview",
+              {
+                "group": "Local to cloud",
+                "pages": [
+                  "production/ci-cd/local-cloud/repository-setup",
+                  "production/ci-cd/local-cloud/github-actions",
+                  "production/ci-cd/local-cloud/gitlab-ci-cd",
+                  "production/ci-cd/local-cloud/buildkite"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "production/deploying-to-cloud/architecture",
+              "production/deploying-to-cloud/using-terraform",
+              "production/deploying-to-cloud/using-helm",
+              {
+                "group": "AWS",
+                "pages": [
+                  "production/deploying-to-cloud/aws/setup",
+                  "production/deploying-to-cloud/aws/resources",
+                  "production/deploying-to-cloud/aws/terraform-apply-policy",
+                  "production/deploying-to-cloud/aws/terraform-destroy-policy",
+                  "production/deploying-to-cloud/aws/emr-policy",
+                  "production/deploying-to-cloud/aws-without-terraform",
+                  "production/deploying-to-cloud/aws/code-pipeline"
+                ]
+              },
+              {
+                "group": "GCP",
+                "pages": [
+                  "production/deploying-to-cloud/gcp/setup",
+                  "production/deploying-to-cloud/gcp/resources"
+                ]
+              },
+              {
+                "group": "Azure",
+                "pages": [
+                  "production/deploying-to-cloud/azure/setup",
+                  "production/deploying-to-cloud/azure/resources"
+                ]
+              },
+              {
+                "group": "DigitalOcean",
+                "pages": [
+                  "production/deploying-to-cloud/digitalocean/setup"
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "production/configuring-production-settings/overview",
+              "production/configuring-production-settings/secrets",
+              "production/configuring-production-settings/compute-resource"
+            ]
+          },
+          {
+            "group": "Version control",
+            "pages": [
+              "production/data-sync/git"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Observability",
+        "pages": [
+          "production/observability/logging",
+          {
+            "group": "Monitoring",
+            "pages": [
+              "production/observability/monitoring",
+              "production/observability/datadog",
+              "production/observability/sentry"
+            ]
+          },
+          {
+            "group": "Alerting",
+            "pages": [
+              "production/observability/alerting-slack",
+              "production/observability/alerting-teams",
+              "production/observability/alerting-email"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Integrations",
+        "pages": [
+          "integrations/spark-pyspark",
+          "integrations/databricks",
+          {
+            "group": "Data",
+            "pages": [
+              "integrations/databases/BigQuery",
+              "integrations/databases/ClickHouse",
+              "integrations/databases/MySQL",
+              "integrations/databases/PostgreSQL",
+              "integrations/databases/Redshift",
+              "integrations/databases/S3",
+              "integrations/databases/Snowflake"
+            ]
+          },
+          {
+            "group": "Airflow",
+            "pages": [
+              "integrations/airflow",
+              "guides/integrate-mage-airflow"
+            ]
+          },
+          {
+            "group": "Prefect",
+            "pages": [
+              "integrations/prefect"
+            ]
+          },
+          "integrations/airbyte",
+          "integrations/dbt-cloud",
+          "integrations/hightouch",
+          "integrations/stitch",
+          "integrations/metaplane",
+          "integrations/great-expectations"
+        ]
+      },
+      {
+        "group": "Guides",
+        "pages": [
+          {
+            "group": "Visualizations",
+            "pages": [
+              "contributing/charts/how-to-add"
+            ]
+          },
+          {
+            "group": "Misc",
+            "pages": [
+              "getting-started/kernels"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "Community",
+        "pages": [
+          "community/github",
+          "community/slack",
+          "community/linkedin",
+          "community/twitter",
+          "community/blog",
+          "community/contact"
+        ]
+      },
+      {
+        "group": "Contributing",
+        "pages": [
+          {
+            "group": "Backend",
+            "pages": [
+              "contributing/backend/overview",
+              {
+                "group": "API",
+                "pages": [
+                  "contributing/backend/api/overview",
+                  "contributing/backend/api/resources",
+                  "contributing/backend/api/policies",
+                  "contributing/backend/api/presenters",
+                  {
+                    "group": "Routes",
+                    "pages": [
+                      "contributing/backend/api/sessions",
+                      "contributing/backend/api/pipelines",
+                      "contributing/backend/api/pipeline-schedules",
+                      "contributing/backend/api/pipeline-runs",
+                      "contributing/backend/api/backfills",
+                      "contributing/backend/api/logs"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "group": "Frontend",
+            "pages": [
+              "contributing/frontend/overview"
+            ]
+          }
+        ]
+      },
+      {
+        "group": "About",
+        "pages": [
+          "about/features",
+          "about/releases",
+          "about/roadmap"
+        ]
+      }
+    ],
+    "backgroundImage": "/background.png",
+    "footerSocials": {
+      "linkedin": "https://www.linkedin.com",
+      "twitter": "https://twitter.com",
+      "facebook": "https://www.facebook.com",
+      "instagram": "https://www.instagram.com"
+    },
+    "api": {
+      "playground": {
+         "mode": "hide"
+      }
+    }
+  }

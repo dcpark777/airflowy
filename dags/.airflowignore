@@ -1,0 +1,13 @@
+# Airflow ignore file
+# 
+# This file tells Airflow which files/directories to ignore when loading DAGs.
+#
+# Example DAGs are disabled by default to avoid cluttering the Airflow UI.
+# To enable example DAGs, remove or comment out the line below.
+#
+# To enable example DAGs:
+# 1. Remove this file, OR
+# 2. Comment out the 'examples/' line below by adding a # at the start
+
+# examples/
+

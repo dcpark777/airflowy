@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-test.txt
+        pip install apache-airflow==2.5.3 croniter
+    
+    - name: Test DAG imports
+      run: |
+        python scripts/validate_dags.py
+      env:
+        AIRFLOW_HOME: ${{ github.workspace }}
+        AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/test_airflow.db
+        AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    
+    - name: Check DAG naming conventions
+      run: |
+        python scripts/check_dag_naming.py
+      env:
+        AIRFLOW_HOME: ${{ github.workspace }}
+        AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/test_airflow.db
+        AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    
+    - name: Check DAG resource limits
+      run: |
+        python scripts/check_dag_resources.py
+      env:
+        AIRFLOW_HOME: ${{ github.workspace }}
+        AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/test_airflow.db
+        AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    
+    - name: Run DAG best practices tests
+      run: |
+        pytest tests/test_dag_best_practices.py -v
+      env:
+        AIRFLOW_HOME: ${{ github.workspace }}
+        AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/test_airflow.db
+        AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+        PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/plugins
+    
+    - name: Run unit tests
+      run: |
+        pytest tests/ -v -m "not integration"
+      env:
+        AIRFLOW_HOME: ${{ github.workspace }}
+        AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+        AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/test_airflow.db
+        AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+        PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/plugins
+
