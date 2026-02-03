@@ -13,7 +13,12 @@ os.environ.setdefault('AIRFLOW__CORE__EXECUTOR', 'SequentialExecutor')
 os.environ.setdefault('AIRFLOW__DATABASE__SQL_ALCHEMY_CONN', 'sqlite:///airflow.db')
 
 from airflow.utils.context import Context
-from operators.databricks_operators import SparkDatabricksOperator
+from operators.databricks_operators import (
+    RETRY_BEHAVIOR_BACKOFF,
+    RETRY_BEHAVIOR_IMMEDIATE,
+    RETRY_BEHAVIOR_NO_RETRY,
+    SparkDatabricksOperator,
+)
 
 
 class TestSparkDatabricksOperator:
@@ -338,6 +343,136 @@ class TestSparkDatabricksOperator:
         )
         assert operator.fetch_logs is False
 
+    def test_default_retry_backoff_and_max_total_retries(self):
+        """Test default and custom retry backoff / max total retries."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        assert operator.default_retry_backoff_seconds == 60
+        assert operator.max_total_retries == 5
+
+        operator2 = SparkDatabricksOperator(
+            task_id='test_spark_job2',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            default_retry_backoff_seconds=120,
+            max_total_retries=3,
+        )
+        assert operator2.default_retry_backoff_seconds == 120
+        assert operator2.max_total_retries == 3
+
+
+class TestRunWithRetries:
+    """Tests for _run_with_retries helper."""
+
+    def test_run_with_retries_success_first_try(self):
+        """_run_with_retries returns result when run_fn succeeds."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        result = operator._run_with_retries(
+            context={'ti': MagicMock()},
+            run_fn=lambda ctx: 42,
+        )
+        assert result == 42
+
+    def test_run_with_retries_no_retry_raises(self):
+        """_run_with_retries re-raises when failure is classified as no retry."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+
+        def fail_syntax(_):
+            raise ValueError("Syntax error in code")
+
+        with pytest.raises(ValueError, match="Syntax error"):
+            operator._run_with_retries(
+                context={'ti': MagicMock()},
+                run_fn=fail_syntax,
+            )
+
+    def test_run_with_retries_retry_then_success(self):
+        """_run_with_retries retries on retryable error and returns when run_fn succeeds."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            max_total_retries=3,
+        )
+        calls = []
+
+        def fail_once_then_succeed(ctx):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("Connection error occurred")
+            return "ok"
+
+        result = operator._run_with_retries(
+            context={'ti': MagicMock()},
+            run_fn=fail_once_then_succeed,
+        )
+        assert result == "ok"
+        assert len(calls) == 2
+
+    def test_run_with_retries_max_total_retries_exceeded(self):
+        """_run_with_retries re-raises after exceeding max_total_retries."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            max_total_retries=2,
+        )
+        calls = []
+
+        def always_fail_retryable(_):
+            calls.append(1)
+            raise RuntimeError("Connection error occurred")
+
+        with pytest.raises(RuntimeError, match="Connection error"):
+            operator._run_with_retries(
+                context={'ti': MagicMock()},
+                run_fn=always_fail_retryable,
+            )
+        assert len(calls) == 3  # initial + 2 retries
+
+    def test_run_with_retries_backoff_sleeps(self):
+        """_run_with_retries sleeps when retry_delay_seconds > 0."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+            default_retry_backoff_seconds=2,
+            max_total_retries=3,
+        )
+        calls = []
+
+        def fail_once_then_succeed(_):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("Rate limit exceeded")
+            return "ok"
+
+        with patch('operators.databricks_operators.time.sleep') as mock_sleep:
+            result = operator._run_with_retries(
+                context={'ti': MagicMock()},
+                run_fn=fail_once_then_succeed,
+            )
+        assert result == "ok"
+        mock_sleep.assert_called_once_with(2)
+
 
 class TestJobRunOutputLogging:
     """Tests for _get_run_output and _log_job_run_output (job logs in Airflow task log)."""
@@ -563,10 +698,11 @@ class TestRetryHandler:
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Empty error message" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_none_message(self):
         """Test retry handler with None error message."""
@@ -576,221 +712,234 @@ class TestRetryHandler:
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler(None)
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler(None)
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Empty error message" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     # Non-retryable error tests
     def test_retry_handler_syntax_error(self):
-        """Test retry handler with syntax error (non-retryable)."""
+        """Test retry handler with syntax error (no retry)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Syntax error in code")
-        assert instant_fail is True
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Syntax error in code")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "Syntax error" in reason
         assert max_retries == 0
+        assert retry_delay == 0
 
     def test_retry_handler_authentication_error(self):
-        """Test retry handler with authentication error (non-retryable)."""
+        """Test retry handler with authentication error (no retry)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Authentication failed")
-        assert instant_fail is True
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Authentication failed")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "Authentication" in reason
         assert max_retries == 0
 
     def test_retry_handler_file_not_found(self):
-        """Test retry handler with file not found error (non-retryable)."""
+        """Test retry handler with file not found error (no retry)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("File not found: /path/to/file")
-        assert instant_fail is True
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("File not found: /path/to/file")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "File not found" in reason
         assert max_retries == 0
 
     def test_retry_handler_configuration_error(self):
-        """Test retry handler with configuration error (non-retryable)."""
+        """Test retry handler with configuration error (no retry)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Invalid configuration")
-        assert instant_fail is True
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Invalid configuration")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "Invalid configuration" in reason or "configuration" in reason.lower()
         assert max_retries == 0
 
     def test_retry_handler_http_401(self):
-        """Test retry handler with HTTP 401 error (non-retryable)."""
+        """Test retry handler with HTTP 401 error (no retry)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("HTTP 401 Unauthorized")
-        assert instant_fail is True
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("HTTP 401 Unauthorized")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "401" in reason or "Unauthorized" in reason
         assert max_retries == 0
 
-    # Retryable error tests
+    # Retryable error tests - immediate (API/network)
     def test_retry_handler_connection_error(self):
-        """Test retry handler with connection error (retryable)."""
+        """Test retry handler with connection error (retry immediate)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Connection error occurred")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Connection error occurred")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Connection error" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_timeout_error(self):
-        """Test retry handler with timeout error (retryable)."""
+        """Test retry handler with timeout error (retry immediate)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Timeout error")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Timeout error")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Timeout" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_connection_reset(self):
-        """Test retry handler with connection reset error (retryable)."""
+        """Test retry handler with connection reset (retry immediate)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Connection reset by peer")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Connection reset by peer")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Connection reset" in reason
         assert max_retries == 3
-
-    def test_retry_handler_out_of_memory(self):
-        """Test retry handler with out of memory error (retryable with fewer retries)."""
-        operator = SparkDatabricksOperator(
-            task_id='test_spark_job',
-            databricks_conn_id='databricks_default',
-            driver_node_type_id='i3.xlarge',
-            worker_node_type_id='i3.xlarge',
-        )
-        instant_fail, reason, max_retries = operator._retry_handler("Out of memory error")
-        assert instant_fail is False
-        assert "Out of memory" in reason
-        assert max_retries == 2
-
-    def test_retry_handler_cluster_terminated(self):
-        """Test retry handler with cluster terminated error (retryable)."""
-        operator = SparkDatabricksOperator(
-            task_id='test_spark_job',
-            databricks_conn_id='databricks_default',
-            driver_node_type_id='i3.xlarge',
-            worker_node_type_id='i3.xlarge',
-        )
-        instant_fail, reason, max_retries = operator._retry_handler("Cluster terminated unexpectedly")
-        assert instant_fail is False
-        assert "Cluster terminated" in reason
-        assert max_retries == 2
-
-    def test_retry_handler_spot_instance(self):
-        """Test retry handler with spot instance interruption (retryable)."""
-        operator = SparkDatabricksOperator(
-            task_id='test_spark_job',
-            databricks_conn_id='databricks_default',
-            driver_node_type_id='i3.xlarge',
-            worker_node_type_id='i3.xlarge',
-        )
-        instant_fail, reason, max_retries = operator._retry_handler("Spot instance interrupted")
-        assert instant_fail is False
-        assert "Spot instance" in reason
-        assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_service_unavailable(self):
-        """Test retry handler with service unavailable error (retryable)."""
+        """Test retry handler with service unavailable (retry immediate)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Service unavailable")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Service unavailable")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Service unavailable" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_http_503(self):
-        """Test retry handler with HTTP 503 error (retryable)."""
+        """Test retry handler with HTTP 503 (retry immediate)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("HTTP 503 Service Unavailable")
-        assert instant_fail is False
-        # "service unavailable" (longer pattern) matches before "503", but both are retryable
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("HTTP 503 Service Unavailable")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Service unavailable" in reason or "503" in reason
         assert max_retries == 3
+        assert retry_delay == 0
+
+    # Retryable error tests - backoff (throttling, resources)
+    def test_retry_handler_out_of_memory(self):
+        """Test retry handler with out of memory (retry after backoff)."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Out of memory error")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
+        assert "Out of memory" in reason
+        assert max_retries == 2
+        assert retry_delay == 60
+
+    def test_retry_handler_cluster_terminated(self):
+        """Test retry handler with cluster terminated (retry after backoff)."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Cluster terminated unexpectedly")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
+        assert "Cluster terminated" in reason
+        assert max_retries == 2
+        assert retry_delay == 60
+
+    def test_retry_handler_spot_instance(self):
+        """Test retry handler with spot instance interruption (retry after backoff)."""
+        operator = SparkDatabricksOperator(
+            task_id='test_spark_job',
+            databricks_conn_id='databricks_default',
+            driver_node_type_id='i3.xlarge',
+            worker_node_type_id='i3.xlarge',
+        )
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Spot instance interrupted")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
+        assert "Spot instance" in reason
+        assert max_retries == 3
+        assert retry_delay == 60
 
     def test_retry_handler_rate_limit(self):
-        """Test retry handler with rate limit error (retryable)."""
+        """Test retry handler with rate limit (retry after backoff)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Rate limit exceeded")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Rate limit exceeded")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
         assert "Rate limit" in reason
         assert max_retries == 3
+        assert retry_delay == 60
 
     def test_retry_handler_lock_contention(self):
-        """Test retry handler with lock contention error (retryable)."""
+        """Test retry handler with lock contention (retry after backoff)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Lock contention detected")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Lock contention detected")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
         assert "Lock" in reason
         assert max_retries == 2
+        assert retry_delay == 60
 
     def test_retry_handler_unknown_error(self):
-        """Test retry handler with unknown error (defaults to retryable)."""
+        """Test retry handler with unknown error (defaults to retry with backoff)."""
         operator = SparkDatabricksOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        instant_fail, reason, max_retries = operator._retry_handler("Some unknown error message")
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Some unknown error message")
+        assert behavior == RETRY_BEHAVIOR_BACKOFF
         assert "Unknown error" in reason
         assert max_retries == 2
+        assert retry_delay == 60
 
     def test_retry_handler_case_insensitive(self):
         """Test that retry handler is case-insensitive."""
@@ -800,14 +949,13 @@ class TestRetryHandler:
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        # Test uppercase
-        instant_fail, reason, max_retries = operator._retry_handler("CONNECTION ERROR")
-        assert instant_fail is False
+        behavior, _, max_retries, retry_delay = operator._retry_handler("CONNECTION ERROR")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert max_retries == 3
-        
-        # Test mixed case
-        instant_fail, reason, max_retries = operator._retry_handler("Syntax Error In Code")
-        assert instant_fail is True
+        assert retry_delay == 0
+
+        behavior, _, max_retries, _ = operator._retry_handler("Syntax Error In Code")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert max_retries == 0
 
     def test_retry_handler_pattern_matching(self):
@@ -818,42 +966,42 @@ class TestRetryHandler:
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        # Pattern should match even if it's part of a larger message
         error_msg = "An error occurred: Connection reset by peer. Please try again."
-        instant_fail, reason, max_retries = operator._retry_handler(error_msg)
-        assert instant_fail is False
+        behavior, reason, max_retries, retry_delay = operator._retry_handler(error_msg)
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Connection reset" in reason
         assert max_retries == 3
+        assert retry_delay == 0
 
     def test_retry_handler_custom_patterns_override(self):
-        """Test that subclasses can override error patterns."""
+        """Test that subclasses can override error patterns (reason, max_retries, delay)."""
         class CustomOperator(SparkDatabricksOperator):
             def _get_retryable_error_patterns(self):
                 return {
-                    "custom error": ("Custom retryable error", 5),
+                    "custom error": ("Custom retryable error", 5, 0),  # immediate
                 }
-            
+
             def _get_non_retryable_error_patterns(self):
                 return {
                     "custom failure": "Custom non-retryable error",
                 }
-        
+
         operator = CustomOperator(
             task_id='test_spark_job',
             databricks_conn_id='databricks_default',
             driver_node_type_id='i3.xlarge',
             worker_node_type_id='i3.xlarge',
         )
-        
-        # Test custom retryable pattern
-        instant_fail, reason, max_retries = operator._retry_handler("Custom error occurred")
-        assert instant_fail is False
+
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Custom error occurred")
+        assert behavior == RETRY_BEHAVIOR_IMMEDIATE
         assert "Custom retryable error" in reason
         assert max_retries == 5
-        
-        # Test custom non-retryable pattern
-        instant_fail, reason, max_retries = operator._retry_handler("Custom failure happened")
-        assert instant_fail is True
+        assert retry_delay == 0
+
+        behavior, reason, max_retries, retry_delay = operator._retry_handler("Custom failure happened")
+        assert behavior == RETRY_BEHAVIOR_NO_RETRY
         assert "Custom non-retryable error" in reason
         assert max_retries == 0
+        assert retry_delay == 0
 
